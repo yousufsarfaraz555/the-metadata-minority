@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Metadata Analyst & Wiper</title>
+    <script>
+        window.piexif = (function() {
+            var r = {};
+            r.version = "1.0.6";
+            r.TagValues = {
+                ImageIFD: { ImageDescription: 270, Make: 271, Model: 272, Software: 305, DateTime: 306, ExifTag: 34665, GPSTag: 34853 },
+                ExifIFD: { DateTimeOriginal: 36867, DateTimeDigitized: 36868 },
+                GPSIFD: { GPSVersionID: 0, GPSLatitudeRef: 1, GPSLatitude: 2, GPSLongitudeRef: 3, GPSLongitude: 4 }
+            };
+            r.ImageIFD = r.TagValues.ImageIFD;
+            r.ExifIFD = r.TagValues.ExifIFD;
+            r.GPSIFD = r.TagValues.GPSIFD;
+
+            r.load = function(data) {
+                var res = { "0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": null };
+                var bin = atob(data.split(",")[1]);
+                var view = new DataView(new ArrayBuffer(bin.length));
+                for (var i = 0; i < bin.length; i++) view.setUint8(i, bin.charCodeAt(i));
+
+                if (view.getUint16(0) !== 0xFFD8) return res;
+
+                var offset = 2;
+                while (offset < view.byteLength) {
+                    if (view.getUint16(offset) === 0xFFE1 && bin.slice(offset + 4, offset + 10) === "Exif\0\0") {
+                        var exifOffset = offset + 10;
+                        var tiffHeader = exifOffset;
+                        var littleEndian = view.getUint16(tiffHeader) === 0x4949;
+                        var firstIFD = tiffHeader + view.getUint32(tiffHeader + 4, littleEndian);
+                        
+                        var readIFD = function(ptr) {
+                            var tags = {};
+                            var entries = view.getUint16(ptr, littleEndian);
+                            for (var j = 0; j < entries; j++) {
+                                var entryPtr = ptr + 2 + (j * 12);
+                                var tag = view.getUint16(entryPtr, littleEndian);
+                                var type = view.getUint16(entryPtr + 2, littleEndian);
+                                var count = view.getUint32(entryPtr + 4, littleEndian);
+                                var valPtr = entryPtr + 8;
+                                if (count * (type === 5 || type === 10 ? 8 : type === 3 ? 2 : type === 4 ? 4 : 1) > 4) {
+                                    valPtr = tiffHeader + view.getUint32(valPtr, littleEndian);
+                                }
+                                if (type === 2) {
+                                    var str = "";
+                                    for (var k = 0; k < count - 1; k++) str += String.fromCharCode(view.getUint8(valPtr + k));
+                                    tags[tag] = str;
+                                } else {
+                                    tags[tag] = view.getUint32(valPtr, littleEndian);
+                                }
+                            }
+                            return tags;
+                        };
+
+                        res["0th"] = readIFD(firstIFD);
+                        if (res["0th"][34665]) res["Exif"] = readIFD(tiffHeader + res["0th"][34665]);
+                        if (res["0th"][34853]) res["GPS"] = readIFD(tiffHeader + res["0th"][34853]);
+                        return res;
+                    }
+                    offset += 2 + view.getUint16(offset + 2);
+                }
+                return res;
+            };
+            return r;
+        })();
+    </script>
+    <style>
+        :root {
+            --primary: #FFFFFF; /* Pure White for CTA and Text */
+            --danger: #ff5252;
+            --warning: #ffc107;
+            --bg: #0B1F17;      /* Darker Forest Green Background */
+            --card: #051B11;    /* Deep Jungle Green Card */
+            --text: #FFFFFF;    /* Pure White */
+            --mist: #D1D5DB;    /* Mist Gray for subtext */
+            --gray: #9CA3AF;    /* Medium Gray for icons/placeholders */
+        }
+
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .container {
+            max-width: 500px;
+            width: 100%;
+            background: var(--card);
+            padding: 25px;
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.6);
+            margin-bottom: 20px;
+        }
+
+        .drop-zone {
+            border: 2px dashed var(--gray);
+            border-radius: 15px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            background: rgba(156, 163, 175, 0.05); /* subtle gray background */
+        }
+
+        .drop-text { font-size: 0.9rem; line-height: 1.6; color: var(--mist); }
+
+        .risk-section { margin: 20px 0; display: none; }
+        .risk-bar-bg { width: 100%; height: 12px; background: #333; border-radius: 6px; overflow: hidden; margin: 10px 0; }
+        #riskBarFill { height: 100%; width: 0%; transition: width 0.5s ease; background: var(--primary); }
+        
+        .verdict-card { padding: 15px; border-radius: 10px; font-size: 0.9rem; line-height: 1.4; margin-bottom: 15px; }
+        .risk-high { background: rgba(255, 82, 82, 0.15); color: var(--danger); border: 1px solid var(--danger); }
+        .risk-med { background: rgba(255, 193, 7, 0.15); color: var(--warning); border: 1px solid var(--warning); }
+        .risk-safe { background: rgba(255, 255, 255, 0.1); color: var(--primary); border: 1px solid var(--primary); }
+
+        .metadata-list {
+            background: #000;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.7rem;
+            max-height: 140px;
+            overflow-y: auto;
+            color: var(--mist);
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .metadata-list b { color: var(--primary); }
+
+        .info-section {
+            margin-top: 10px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: var(--mist);
+            border-top: 1px solid #333;
+        }
+
+        .info-section h3 {
+            margin: 0 0 10px 0;
+            color: var(--primary);
+            font-size: 0.95rem;
+        }
+
+        input[type="file"] { display: none; }
+        .preview-img { display: none; width: 100%; border-radius: 10px; margin: 20px 0; border: 1px solid #333; }
+        
+        .download-btn {
+            display: none;
+            text-align: center;
+            background: var(--primary);
+            color: #000; /* Dark text on white button */
+            padding: 16px;
+            text-decoration: none;
+            border-radius: 12px;
+            font-weight: 800;
+            width: 100%;
+            box-sizing: border-box;
+            margin-bottom: 20px;
+            line-height: 1.4;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="drop-zone" id="dropZone">
+        <div class="drop-text" id="dropText">
+            SELECT IMAGE TO ANALYZE<br>
+            फोटो चुनें / ছবি নির্বাচন করুন<br>
+            ଫଟୋ ବାଛନ୍ତୁ / ᱪᱤᱛᱟᱹᱨ ᱵᱟᱪᱷᱟᱣ ᱢᱮ
+        </div>
+        <input type="file" id="fileInput" accept="image/jpeg, image/jpg, image/png">
+    </div>
+
+    <div id="status" style="text-align:center; margin-top:10px; font-size: 0.8rem; color: var(--mist);"></div>
+
+    <div id="riskSection" class="risk-section">
+        <div style="display:flex; justify-content:space-between; font-size:0.75rem; font-weight:bold; margin-bottom: 5px;">
+            <span>RISK LEVEL / जोखिम स्तर</span>
+            <span id="riskPct">0%</span>
+        </div>
+        <div class="risk-bar-bg"><div id="riskBarFill"></div></div>
+        <div id="verdictBox" class="verdict-card"></div>
+        <div id="metadataList" class="metadata-list"></div>
+    </div>
+
+    <img id="preview" class="preview-img">
+    
+    <a id="downloadBtn" class="download-btn">
+        DOWNLOAD CLEAN IMAGE<br>
+        साफ़ फोटो डाउनलोड करें / পরিষ্কার ছবি ডাউনলোড করুন<br>
+        ଫଟୋ ଡାଉନଲୋଡ୍ କରନ୍ତୁ / ᱥᱟᱯᱷᱟ ᱪᱤᱛᱟᱹᱨ ᱰᱟᱩᱱᱞᱳᱰ ᱢᱮ
+    </a>
+
+    <div class="info-section">
+        <h3>Why this tool? / यह क्यों?</h3>
+        <p>
+            <b>EN:</b> Photos contain hidden data (GPS, Serial Nos) that can put you or your source in danger. This tool identifies and wipes that data locally on your phone.<br>
+            <b>HI:</b> फोटो में छिपा डेटा (GPS, सीरियल नंबर) आपको या आपके सोर्स को खतरे में डाल सकता है। यह टूल उस डेटा को आपके फोन पर ही मिटा देता है।<br>
+            <b>BN:</b> ছবিতে লুকানো তথ্য (GPS, সিরিয়াল নম্বর) আপনাকে বা আপনার সূত্রকে বিপদে ফেলতে পারে। এই টুলটি আপনার ফোনেই সেই তথ্য মুছে ফেলে।<br>
+            <b>OR:</b> ଫଟୋରେ ଲୁଚି ରହିଥିବା ତଥ୍ୟ (GPS, ସିରିଏଲ୍ ନମ୍ବର) ଆପଣଙ୍କୁ ବିପଦରେ ପକାଇପାରେ | ଏହି ଟୁଲ୍ ଆପଣଙ୍କ ଫୋନରେ ହିଁ ସେହି ତଥ୍ୟକୁ ପୋଛି ଦିଏ |<br>
+            <b>SAT:</b> ᱪᱤᱛᱟᱹᱨ ᱨᱮ ᱩᱠᱩᱣᱟᱱ ᱠᱟᱛᱷᱟ (GPS, Serial Nos) ᱛᱟᱦᱮᱸᱱᱟ, ᱡᱟᱦᱟᱸ ᱫᱚ ᱟᱢ ᱟᱨ ᱟᱢᱟᱜ ᱥᱚᱨᱥ (source) ᱮ ᱮᱴᱠᱮᱴᱚᱬᱮ ᱨᱮᱭ ᱯᱟᱲᱟᱣ ᱫᱟᱲᱮᱭᱟᱜᱼᱟ ᱾ ᱱᱚᱶᱟ ᱴᱩᱞ ᱫᱚ ᱚᱱᱟ ᱠᱟᱛᱷᱟ ᱟᱢᱟᱜ ᱯᱷᱳᱱ ᱨᱮᱜᱮ ᱚᱪᱚᱜᱟ ᱾
+        </p>
+    </div>
+</div>
+
+<canvas id="canvas" style="display:none;"></canvas>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const status = document.getElementById('status');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const preview = document.getElementById('preview');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const riskSection = document.getElementById('riskSection');
+
+    dropZone.onclick = (e) => { if (e.target !== fileInput) fileInput.click(); };
+
+    fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        status.innerText = "Analyzing & Cleaning...";
+        const reader = new FileReader();
+
+        reader.onload = function(event) {
+            const img = new Image();
+            img.onload = function() {
+                analyzeMetadata(event.target.result, file.type);
+
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+
+                const cleanDataUrl = canvas.toDataURL("image/jpeg", 0.9);
+
+                preview.src = cleanDataUrl;
+                preview.style.display = "block";
+                downloadBtn.href = cleanDataUrl;
+                
+                const randomName = Math.random().toString(36).substring(2, 14);
+                downloadBtn.download = randomName + ".jpg";
+                
+                downloadBtn.style.display = "block";
+                status.innerText = "Processing Complete.";
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    };
+
+    function analyzeMetadata(dataUrl, type) {
+        let score = 0;
+        let logs = [];
+        let locationFound = "";
+        riskSection.style.display = "block";
+
+        if (type.includes("jpeg") || type.includes("jpg")) {
+            try {
+                const exif = piexif.load(dataUrl);
+                
+                if (exif["GPS"] && Object.keys(exif["GPS"]).length > 0) { 
+                    score += 60; 
+                    logs.push("<b>GPS Coordinates Found</b>"); 
+                }
+
+                const city = (exif["0th"] && exif["0th"][34061]) || "";
+                const country = (exif["0th"] && exif["0th"][34066]) || "";
+                if(city || country) {
+                    locationFound = [city, country].filter(Boolean).join(", ");
+                    logs.push("<b>Location Found:</b> " + locationFound);
+                    score += 10;
+                }
+
+                if (exif["0th"] && exif["0th"][270]) { 
+                    score += 20; 
+                    logs.push("<b>Caption Found:</b> " + exif["0th"][270]); 
+                }
+
+                const make = (exif["0th"] && exif["0th"][271]) || "";
+                const model = (exif["0th"] && exif["0th"][272]) || "";
+                if (make || model) { 
+                    score += 10; 
+                    logs.push("<b>Camera Info Found:</b> " + make + " " + model); 
+                }
+
+                const dateTaken = (exif["Exif"] && exif["Exif"][36867]) || "";
+                if (dateTaken) { 
+                    score += 10; 
+                    logs.push("<b>Time & Date Taken:</b> " + dateTaken); 
+                }
+
+            } catch (e) { 
+                console.error(e);
+                logs.push("Parsing Issue - Data Hidden"); 
+                score += 15; 
+            }
+        }
+
+        const bar = document.getElementById('riskBarFill');
+        const box = document.getElementById('verdictBox');
+        const list = document.getElementById('metadataList');
+        
+        document.getElementById('riskPct').innerText = score + "%";
+        bar.style.width = score + "%";
+        list.innerHTML = logs.length > 0 ? logs.join("<br>") : "Clean.";
+
+        const locDisplay = locationFound ? `<br><span style="color:white; background:rgba(0,0,0,0.3); padding:2px 5px; border-radius:4px;">Detected: ${locationFound}</span>` : "";
+
+        if (score >= 60) {
+            bar.style.backgroundColor = "var(--danger)";
+            box.className = "verdict-card risk-high";
+            box.innerHTML = `
+                ⚠️ <b>HIGH RISK / खतरा</b> ${locDisplay}<br>
+                <b>EN:</b> GPS detected. DO NOT SEND!<br>
+                <b>HI:</b> इसमें लोकेशन है। मत भेजें!<br>
+                <b>BN:</b> এতে অবস্থান তথ্য আছে। পাঠাবেন না!<br>
+                <b>OR:</b> ଏଥିରେ ଅବସ୍ଥାନ ସୂଚନା ଅଛି | ପଠାନ୍ତୁ ନାହିଁ!<br>
+                <b>SAT:</b> ᱱᱚᱶᱟ ᱨᱮ GPS ᱢᱮᱱᱟᱜᱼᱟ ᱾ <b>ᱟᱞᱚᱢ ᱠᱩᱞ-ᱟ!</b>
+            `;
+        } else if (score > 0) {
+            bar.style.backgroundColor = "var(--warning)";
+            box.className = "verdict-card risk-med";
+            box.innerHTML = `
+                ⚠️ <b>CAUTION / सावधानी</b><br>
+                <b>EN:</b> Device footprints found.<br>
+                <b>HI:</b> डिवाइस की जानकारी मिली है।<br>
+                <b>BN:</b> ডিভাইসের তথ্য পাওয়া গেছে।<br>
+                <b>OR:</b> ଡିଭାଇସ୍ ସୂଚନା ମିଳିଛି |<br>
+                <b>SAT:</b> ᱱᱚᱶᱟ ᱨᱮ ᱰᱤᱵᱷᱟᱭᱤᱥ ᱠᱟᱛᱷᱟ ᱢᱮᱱᱟᱜᱼᱟ ᱾
+            `;
+        } else {
+            bar.style.backgroundColor = "var(--primary)";
+            box.className = "verdict-card risk-safe";
+            box.innerHTML = `
+                ✅ <b>SAFE / सुरक्षित</b><br>
+                <b>EN:</b> No digital fingerprints detected.<br>
+                <b>HI:</b> कोई डिजिटल फिंगरप्रिंट नहीं मिला।<br>
+                <b>BN:</b> কোনো ডিজিটাল ফিঙ্গারপ্রিন্ট পাওয়া যায়নি।<br>
+                <b>OR:</b> କୌଣସି ଡିଜିଟାଲ୍ ଫିଙ୍ଗରପ୍ରିଣ୍ଟ ମିଳିଲା ନାହିଁ |<br>
+                <b>SAT:</b> ᱱᱚᱶᱟ ᱫᱚ ᱵᱩᱜᱤ ᱜᱮᱭᱟ ᱾
+            `;
+        }
+    }
+</script>
+</body>
+</html>
